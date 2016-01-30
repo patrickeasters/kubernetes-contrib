@@ -19,6 +19,7 @@ package mungers
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -141,7 +142,7 @@ func (sq *SubmitQueue) Initialize(config *github.Config) error {
 	e2e := &e2e.E2ETester{
 		JenkinsJobs: sq.JenkinsJobs,
 		JenkinsHost: sq.JenkinsHost,
-		BuildStatus: map[string]string{},
+		BuildStatus: map[string]e2e.BuildInfo{},
 	}
 	sq.e2e = e2e
 	if len(sq.Address) > 0 {
@@ -192,15 +193,14 @@ func (sq *SubmitQueue) EachLoop() error {
 // AddFlags will add any request flags to the cobra `cmd`
 func (sq *SubmitQueue) AddFlags(cmd *cobra.Command, config *github.Config) {
 	cmd.Flags().StringSliceVar(&sq.JenkinsJobs, "jenkins-jobs", []string{
-		"kubernetes-e2e-gce",
-		"kubernetes-e2e-gke-ci",
 		"kubernetes-build",
-		"kubernetes-e2e-gce-parallel",
-		"kubernetes-e2e-gce-autoscaling",
-		"kubernetes-e2e-gce-reboot",
+		"kubernetes-test-go",
+		"kubernetes-e2e-gce",
+		"kubernetes-e2e-gce-slow",
+		"kubernetes-e2e-gke",
+		"kubernetes-e2e-gke-slow",
 		"kubernetes-e2e-gce-scalability",
 		"kubernetes-kubemark-gce",
-		"kubernetes-test-go",
 	}, "Comma separated list of jobs in Jenkins to use for stability testing")
 	cmd.Flags().StringVar(&sq.JenkinsHost, "jenkins-host", "http://jenkins-master:8080", "The URL for the jenkins job to watch")
 	cmd.Flags().StringSliceVar(&sq.RequiredStatusContexts, "required-contexts", []string{travisContext}, "Comma separate list of status contexts required for a PR to be considered ok to merge")
@@ -520,15 +520,47 @@ func (sq *SubmitQueue) flushGithubE2EQueue(reason string) {
 	}
 }
 
+type queueSorter []*github.MungeObject
+
+func (s queueSorter) Len() int      { return len(s) }
+func (s queueSorter) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s queueSorter) Less(i, j int) bool {
+	a := s[i]
+	b := s[j]
+
+	aPrio := a.Priority()
+	bPrio := b.Priority()
+
+	// eparis randomly decided that unlabel issues count at p3
+	if aPrio == math.MaxInt32 {
+		aPrio = 3
+	}
+	if bPrio == math.MaxInt32 {
+		bPrio = 3
+	}
+
+	if aPrio < bPrio {
+		return true
+	} else if aPrio > bPrio {
+		return false
+	}
+
+	return *a.Issue.Number < *b.Issue.Number
+}
+
 // sq.Lock() better held!!!
 func (sq *SubmitQueue) orderedE2EQueue() []int {
-	// Find and do the lowest PR number first
-	var keys []int
-	for k := range sq.githubE2EQueue {
-		keys = append(keys, k)
+	prs := []*github.MungeObject{}
+	for _, obj := range sq.githubE2EQueue {
+		prs = append(prs, obj)
 	}
-	sort.Ints(keys)
-	return keys
+	sort.Sort(queueSorter(prs))
+
+	var ordered []int
+	for _, obj := range prs {
+		ordered = append(ordered, *obj.Issue.Number)
+	}
+	return ordered
 }
 
 // handleGithubE2EAndMerge waits for PRs that are ready to re-run the github
